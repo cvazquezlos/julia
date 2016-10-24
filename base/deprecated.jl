@@ -1086,4 +1086,7 @@ eval(Base.LinAlg, quote
     end
 end)
 
+@deprecate takebuf_array take!
+@deprecate takebuf_string(b) String(take!(b))
+
 # End deprecations scheduled for 0.6

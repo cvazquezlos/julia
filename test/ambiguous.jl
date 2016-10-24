@@ -51,7 +51,7 @@ let err = try
           end
     io = IOBuffer()
     Base.showerror(io, err)
-    lines = split(takebuf_string(io), '\n')
+    lines = split(String(take!(io)), '\n')
     ambig_checkline(str) = startswith(str, "  ambig(x, y::Integer) in Main at") ||
                            startswith(str, "  ambig(x::Integer, y) in Main at")
     @test ambig_checkline(lines[2])
