@@ -1101,6 +1101,13 @@ eval(Base.Dates,quote
                dayname(DayOfWeek(dt); locale=locale))
     @deprecate(dayabbr(dt::Integer;locale::AbstractString="english"),
                dayabbr(DayOfWeek(dt); locale=locale))
+    @deprecate(ismonday(dt::TimeType), DayOfWeek(dt) == Mon)
+    @deprecate(istuesday(dt::TimeType), DayOfWeek(dt) == Tue)
+    @deprecate(iswednesday(dt::TimeType), DayOfWeek(dt) == Wed)
+    @deprecate(isthursday(dt::TimeType), DayOfWeek(dt) == Thu)
+    @deprecate(isfriday(dt::TimeType), DayOfWeek(dt) == Fri)
+    @deprecate(issaturday(dt::TimeType), DayOfWeek(dt) == Sat)
+    @deprecate(issunday(dt::TimeType), DayOfWeek(dt) == Sun)
 end)
 
 
