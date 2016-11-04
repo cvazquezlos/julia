@@ -551,7 +551,7 @@ static int valid_type_param(jl_value_t *v)
     return jl_is_type(v) || jl_is_typevar(v) || jl_is_symbol(v) || jl_isbits(jl_typeof(v));
 }
 
-static int within_typevar(jl_value_t *t, jl_tvar_t *v)
+static int within_typevar(jl_value_t *t, jl_value_t *vlb, jl_value_t *vub)
 {
     jl_value_t *lb = t, *ub = t;
     if (jl_is_typevar(t)) {
@@ -562,9 +562,9 @@ static int within_typevar(jl_value_t *t, jl_tvar_t *v)
         //ub = ((jl_tvar_t*)t)->ub;
     }
     else if (!jl_is_type(t)) {
-        return v->lb == jl_bottom_type && v->ub == jl_any_type;
+        return vlb == jl_bottom_type && vub == (jl_value_t*)jl_any_type;
     }
-    return jl_subtype(v->lb, lb) && jl_subtype(ub, v->ub);
+    return jl_subtype(vlb, lb) && jl_subtype(ub, vub);
 }
 
 jl_value_t *jl_apply_type(jl_value_t *tc, jl_value_t **params, size_t n)
@@ -588,9 +588,8 @@ jl_value_t *jl_apply_type(jl_value_t *tc, jl_value_t **params, size_t n)
         }
 
         jl_unionall_t *ua = (jl_unionall_t*)tc;
-        if (jl_has_free_typevars(ua->var->lb) || jl_has_free_typevars(ua->var->ub))
-            jl_error("invalid instantiation");
-        if (!within_typevar(pi, ua->var))
+        if (!jl_has_free_typevars(ua->var->lb) && !jl_has_free_typevars(ua->var->ub) &&
+            !within_typevar(pi, ua->var->lb, ua->var->ub))
             jl_type_error_rt("type", "parameter", (jl_value_t*)ua->var, pi);
 
         tc = jl_instantiate_unionall(ua, pi);
@@ -662,7 +661,7 @@ jl_value_t *jl_rewrap_unionall(jl_value_t *t, jl_value_t *u)
         return t;
     JL_GC_PUSH1(&t);
     t = jl_rewrap_unionall(t, ((jl_unionall_t*)u)->body);
-    t = jl_new_unionall_type(((jl_unionall_t*)u)->var, t);
+    t = (jl_value_t*)jl_new_unionall_type(((jl_unionall_t*)u)->var, t);
     JL_GC_POP();
     return t;
 }
@@ -715,6 +714,38 @@ void jl_precompute_memoized_dt(jl_datatype_t *dt)
         if (dt->isleaftype)
             dt->isleaftype = (istuple ? jl_is_leaf_type(p) : !dt->hasfreetypevars);
     }
+}
+
+static void check_datatype_parameters(jl_typename_t *tn, jl_value_t **params, size_t np)
+{
+    jl_value_t *wrapper = tn->wrapper;
+    jl_value_t **bounds;
+    JL_GC_PUSHARGS(bounds, np*2);
+    int i = 0;
+    while (jl_is_unionall(wrapper)) {
+        jl_tvar_t *tv = ((jl_unionall_t*)wrapper)->var;
+        bounds[i++] = tv->lb;
+        bounds[i++] = tv->ub;
+        wrapper = ((jl_unionall_t*)wrapper)->body;
+    }
+    assert(i == np*2);
+    wrapper = tn->wrapper;
+    for(i=0; i < np; i++) {
+        assert(jl_is_unionall(wrapper));
+        jl_tvar_t *tv = ((jl_unionall_t*)wrapper)->var;
+        if (!within_typevar(params[i], bounds[2*i], bounds[2*i+1])) {
+            // TODO: pass a new version of `tv` containing the instantiated bounds
+            jl_type_error_rt(jl_symbol_name(tn->name), jl_symbol_name(tv->name), (jl_value_t*)tv, params[i]);
+        }
+        int j;
+        for(j=2*i+2; j < 2*np; j++) {
+            jl_value_t*bj = bounds[j];
+            if (bj != (jl_value_t*)jl_any_type && bj != jl_bottom_type)
+                bounds[j] = jl_substitute_var(bj, tv, params[i]);
+        }
+        wrapper = ((jl_unionall_t*)wrapper)->body;
+    }
+    JL_GC_POP();
 }
 
 static arraylist_t partial_inst;
@@ -790,6 +821,10 @@ static jl_value_t *inst_datatype(jl_datatype_t *dt, jl_svec_t *p, jl_value_t **i
 
     jl_datatype_t *ndt = NULL;
     jl_svec_t *ftypes;
+
+    // check parameters against bounds in type definition
+    if (!istuple)
+        check_datatype_parameters(tn, iparams, ntp);
 
     // move array of instantiated parameters to heap; we need to keep it
     JL_GC_PUSH2(&p, &ndt);
@@ -1009,10 +1044,11 @@ static jl_value_t *inst_type_w_(jl_value_t *t, jl_typeenv_t *env, jl_typestack_t
         while (e != NULL) {
             if (e->var == (jl_tvar_t*)t) {
                 jl_value_t *val = e->val;
-                if (check && !jl_is_typevar(val) && !within_typevar(val, (jl_tvar_t*)t)) {
-                    jl_type_error_rt("type parameter",
-                                     jl_symbol_name(((jl_tvar_t*)t)->name), t, val);
-                }
+                // TODO jb/subtype this seems unnecessary
+                //if (check && !jl_is_typevar(val) && !within_typevar(val, (jl_tvar_t*)t)) {
+                //    jl_type_error_rt("type parameter",
+                //                     jl_symbol_name(((jl_tvar_t*)t)->name), t, val);
+                //}
                 return val;
             }
             e = e->prev;
@@ -1077,20 +1113,12 @@ static jl_value_t *inst_type_w_(jl_value_t *t, jl_typeenv_t *env, jl_typestack_t
     if (tn == jl_tuple_typename)
         return inst_tuple_w_(t, env, stack, check);
     size_t ntp = jl_svec_len(tp);
-    jl_value_t *wrapper = tn->wrapper;
     jl_value_t **iparams;
     JL_GC_PUSHARGS(iparams, ntp);
     int cacheable = 1, bound = 0;
     for(i=0; i < ntp; i++) {
         jl_value_t *elt = jl_svecref(tp, i);
         iparams[i] = (jl_value_t*)inst_type_w_(elt, env, stack, check);
-        assert(jl_is_unionall(wrapper));
-        jl_tvar_t *tv = ((jl_unionall_t*)wrapper)->var;
-        if (!within_typevar(iparams[i], tv)) {
-            jl_type_error_rt(jl_symbol_name(tn->name), jl_symbol_name(tv->name),
-                             tv, iparams[i]);
-        }
-        wrapper = ((jl_unionall_t*)wrapper)->body;
         bound |= (iparams[i] != elt);
         if (cacheable && jl_has_free_typevars(iparams[i]))
             cacheable = 0;
